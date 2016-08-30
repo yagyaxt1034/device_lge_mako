@@ -45,6 +45,16 @@ on early-boot
     setrlimit 8 67108864 67108864
 
 on boot
+
+    # update foreground cpuset now that processors are up
+    # foreground gets all CPUs except CPU 3
+    # CPU 3 is reserved for the top app
+    write /dev/cpuset/foreground/cpus 0-2
+    write /dev/cpuset/foreground/boost/cpus 0-2
+    write /dev/cpuset/background/cpus 0-1
+    write /dev/cpuset/system-background/cpus 0-2
+    write /dev/cpuset/top-app/cpus 0-3
+
     #Create QMUX deamon socket area
     mkdir /dev/socket/qmux_radio 0770 radio radio
     chmod 2770 /dev/socket/qmux_radio
@@ -340,7 +350,8 @@ service mpdecision /system/bin/mpdecision --no_sleep --avg_comp
 service qcamerasvr /system/bin/mm-qcamera-daemon
     class late_start
     user camera
-    group camera system inet input
+    group camera system inet input graphics
+    writepid /dev/cpuset/system-background/tasks
 
 service wcnss_init /system/bin/sh /system/etc/init.mako.wifi.sh
     class late_start
