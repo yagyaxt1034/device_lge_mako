@@ -1,0 +1,23 @@
+# cpuset balancer (root process)
+type mpcpusetd, domain;
+type mpcpusetd_exec, exec_type, file_type;
+
+# DAC overrides
+allow mpcpusetd self:capability dac_override;
+auditallow mpcpusetd self:capability dac_override;
+
+# Started by init
+init_daemon_domain(mpcpusetd)
+
+# CPU hotplug uevent to manage cores
+allow mpcpusetd self:netlink_kobject_uevent_socket { create setopt bind read getopt};
+allow mpcpusetd self:capability net_admin;
+
+# check whether cpu is online via sysfs
+allow mpcpusetd sysfs_devices_system_cpu:file r_file_perms;
+allow mpcpusetd proc_net:file r_file_perms;
+
+# update cpuset
+allow mpcpusetd cgroup:file rw_file_perms;
+allow mpcpusetd self:capability sys_nice;
+allow mpcpusetd self:capability sys_admin;

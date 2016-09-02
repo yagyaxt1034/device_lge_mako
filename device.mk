@@ -246,6 +246,11 @@ PRODUCT_PACKAGES += \
 	libwfcu \
 	conn_init
 
+ifeq ($(ENABLE_CPUSETS),true)
+PRODUCT_PACKAGES += \
+	mpcpusetd
+endif
+
 PRODUCT_PACKAGES += \
 	keystore.msm8960
 
