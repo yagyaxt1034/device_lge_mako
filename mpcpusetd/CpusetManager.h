@@ -2,7 +2,6 @@
 #ifndef __CPUSETMANAGER_H__
 #define __CPUSETMANAGER_H__
 
-#include <vector>
 #include <sysutils/NetlinkEvent.h>
 
 class CpusetManager {
@@ -11,9 +10,9 @@ private:
     CpusetManager();
 
     bool isOnline(int num);
-    int mMaxCpuNum;
-    std::vector<int> mOnlineCpus;
-    void setCpuset(const char *filename, int denominator);
+    uint8_t mMaxCpus;
+    uint64_t mCpuMask;
+    int setCpuset(const char *filename, int cpus);
     void updateCpuset();
 
 public:
