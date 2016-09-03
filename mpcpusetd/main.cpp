@@ -1,5 +1,6 @@
 // vim: ts=4 sw=4 expandtab
 
+#include <sched.h>
 #include <sys/resource.h>
 #include <android-base/logging.h>
 #include <android-base/stringprintf.h>
@@ -11,7 +12,14 @@
 int main(int argc, char** argv) {
     setenv("ANDROID_LOG_TAGS", "*:v", 1);
     android::base::InitLogging(argv, android::base::LogdLogger(android::base::SYSTEM));
+
     setpriority(PRIO_PROCESS, 0, -20);
+
+    struct sched_param param = {
+            .sched_priority = 1,
+    };
+    sched_setscheduler(0, SCHED_FIFO, &param);
+
     LOG(INFO) << "mpcpusetd 0.1 fireing up";
 
     CpusetManager *cm;
