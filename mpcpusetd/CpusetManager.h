@@ -2,6 +2,10 @@
 #ifndef __CPUSETMANAGER_H__
 #define __CPUSETMANAGER_H__
 
+// To make sure cpu_set_t is included from sched.h
+#define _GNU_SOURCE 1
+#include <sched.h>
+
 #include <sysutils/NetlinkEvent.h>
 
 class CpusetManager {
@@ -9,10 +13,10 @@ private:
     static CpusetManager *sInstance;
     CpusetManager();
 
-    bool isOnline(int num);
-    uint8_t mMaxCpus;
-    uint64_t mCpuMask;
-    int setCpuset(const char *filename, int cpus);
+    size_t mMaxCpus;
+    cpu_set_t mCpuSet;
+    void setCpuset(const char *filename, int cpus);
+    void printCpuset(const char *filename, char* out, int outsiz);
     void updateCpuset();
 
 public:

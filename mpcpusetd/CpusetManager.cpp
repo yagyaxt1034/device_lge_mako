@@ -1,6 +1,10 @@
 // vim: ts=4 sw=4 expandtab
 
+//#define CPUSET_DEBUG 1
+#ifdef CPUSET_DEBUG
 #define LOG_NDEBUG 0
+#endif
+
 #define LOG_TAG "CpusetManager"
 #include <unistd.h>
 #include <fcntl.h>
@@ -19,18 +23,19 @@
 #define CPUSET_BG_SYSTEM "/dev/cpuset/system-background/cpus"
 #define CPUSET_TOP_APP "/dev/cpuset/top-app/cpus"
 
-#define SYSFS_CPU_ONLINE_FORMAT "/sys/devices/system/cpu/cpu%d/online"
+#define SYSFS_CPU_ONLINE "/sys/devices/system/cpu/online"
 
 CpusetManager::CpusetManager() {
     mMaxCpus = sysconf(_SC_NPROCESSORS_CONF);
+    CPU_ZERO(&mCpuSet);
 }
 
 CpusetManager::~CpusetManager() {
 }
 
 int CpusetManager::start() {
-    if (mMaxCpus > 64) {
-        SLOGE("Too many cpus, do not start mpcpusetd");
+    if (access(SYSFS_CPU_ONLINE, R_OK) != 0) {
+        SLOGE("cannot open %s file: %s", SYSFS_CPU_ONLINE, strerror(errno));
         return -1;
     }
     updateCpuset();
@@ -49,19 +54,64 @@ CpusetManager* CpusetManager::Instance() {
     return sInstance;
 }
 
-bool CpusetManager::isOnline(int num) {
-    std::string sysfs_cpu_online(
-            android::base::StringPrintf(SYSFS_CPU_ONLINE_FORMAT, num));
-    int online = 0;
-    fs_read_atomic_int(sysfs_cpu_online.c_str(), &online);
-    return online == 1;
+/**
+ * copy from android_util_Process.cpp
+ * Sample CPUset list format:
+ *  0-3,4,6-8
+ */
+static void parse_cpuset_cpus(char *cpus, cpu_set_t *cpu_set) {
+    unsigned int start, end, matched, i;
+    char *cpu_range = strtok(cpus, ",");
+    while (cpu_range != NULL) {
+        start = end = 0;
+        matched = sscanf(cpu_range, "%u-%u", &start, &end);
+        cpu_range = strtok(NULL, ",");
+        if (start >= CPU_SETSIZE) {
+            SLOGE("parse_cpuset_cpus: ignoring CPU number larger than %d.", CPU_SETSIZE);
+            continue;
+        } else if (end >= CPU_SETSIZE) {
+            SLOGE("parse_cpuset_cpus: ignoring CPU numbers larger than %d.", CPU_SETSIZE);
+            end = CPU_SETSIZE - 1;
+        }
+        if (matched == 1) {
+            CPU_SET(start, cpu_set);
+        } else if (matched == 2) {
+            for (i = start; i <= end; i++) {
+                CPU_SET(i, cpu_set);
+            }
+        } else {
+            SLOGE("Failed to match cpus");
+        }
+    }
+    return;
 }
 
-int CpusetManager::setCpuset(const char *filename, int cpus) {
+void CpusetManager::printCpuset(const char *filename, char* out, int outsize) {
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) {
+        out[0] = '\0';
+        return;
+    }
+    ssize_t rsize = read(fd, out, outsize);
+    if (rsize <= 0) {
+        out[0] = '\0';
+        close(fd);
+        return;
+    }
+    out[rsize - 1] = '\0';
+    close(fd);
+}
+
+void CpusetManager::setCpuset(const char *filename, int cpus) {
+#ifdef CPUSET_DEBUG
+    char old_mask[64], new_mask[64];
+    printCpuset(filename, old_mask, sizeof(old_mask));
+#endif
+
     int fd = open(filename, O_WRONLY);
     if (fd < 0) {
         SLOGE("open %s failed: %s", filename, strerror(errno));
-        return 0;
+        return;
     }
 
     int busy = 0;
@@ -69,10 +119,11 @@ int CpusetManager::setCpuset(const char *filename, int cpus) {
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
     cpus = MAX(1, cpus);
+
     int added = 0;
 
-    for (int i = 0; i < mMaxCpus; i++) {
-        if (mCpuMask & (1<<i)) {
+    for (int i = mMaxCpus-1; i >= 0; i--) {
+        if (CPU_ISSET(i, &mCpuSet)) {
             android::base::StringAppendF(&cpumask, "%d,", i);
             added++;
             if (cpus == added) {
@@ -81,30 +132,57 @@ int CpusetManager::setCpuset(const char *filename, int cpus) {
         }
     }
 
+    int saved_errno = 0;
+
     if (write(fd, cpumask.c_str(), cpumask.length()) < 0) {
-        if (errno == EBUSY) {
-            busy = 1;
-        } else {
-            SLOGE("write %s to %s : failed: %s", cpumask.c_str(), filename, strerror(errno));
-        }
+        saved_errno = errno;
+        SLOGE("write error to %s: %s", filename, strerror(saved_errno));
     }
     close(fd);
-    return busy;
+
+#ifdef CPUSET_DEBUG
+    {
+        printCpuset(filename, new_mask, sizeof(new_mask));
+        if (saved_errno != 0) {
+            SLOGE("write: %s => %s but %s to %s", old_mask, cpumask.c_str(), new_mask, filename);
+        } else {
+            SLOGV("write %s => %s to %s", old_mask, cpumask.c_str(), filename);
+        }
+    }
+#endif
 }
 
 void CpusetManager::updateCpuset() {
-    uint64_t cpumask = 0;
-    uint8_t online = 0;
-    for (int cpu = 0; cpu < mMaxCpus; cpu++) {
-        if (isOnline(cpu)) {
-            cpumask |= 1<<cpu;
-            online++;
-        }
-    }
-    if (cpumask == mCpuMask) {
+    cpu_set_t cpu_set;
+    char *line = NULL;
+    size_t len = 0;
+    int online = 0;
+    CPU_ZERO(&cpu_set);
+
+    FILE *fp = fopen(SYSFS_CPU_ONLINE, "re");
+    if (fp == NULL) {
+        SLOGE("cannot open %s file: %s", SYSFS_CPU_ONLINE, strerror(errno));
         return;
     }
-    mCpuMask = cpumask;
+    ssize_t num_read = getline(&line, &len, fp);
+    fclose(fp);
+
+    if (num_read > 0) {
+        parse_cpuset_cpus(line, &cpu_set);
+    } else {
+        SLOGE("getline caught error: %s", strerror(errno));
+        free(line);
+        return;
+    }
+    free(line);
+
+    if (CPU_EQUAL(&mCpuSet, &cpu_set)) {
+        return;
+    }
+
+    memcpy(&mCpuSet, &cpu_set, sizeof(mCpuSet));
+
+    online = CPU_COUNT(&mCpuSet);
 
     if (online == 0) {
         // never happens
@@ -113,14 +191,12 @@ void CpusetManager::updateCpuset() {
     } else {
         int busy;
         setCpuset(CPUSET_TOP_APP, online);
-        busy = setCpuset(CPUSET_FG, online *3/4 );
-        setCpuset(CPUSET_FG_BOOST, online *3/4);
-        if (busy) {
-            // XXX: try again
-            setCpuset(CPUSET_FG, online *3/4 );
-        }
         setCpuset(CPUSET_BG_SYSTEM, online *3/4);
         setCpuset(CPUSET_BG, 1);
+        // XXX: set fg twice to avoid EBUSY
+        setCpuset(CPUSET_FG, online);
+        setCpuset(CPUSET_FG, online *3/4);
+        setCpuset(CPUSET_FG_BOOST, online *3/4);
     }
 }
 
